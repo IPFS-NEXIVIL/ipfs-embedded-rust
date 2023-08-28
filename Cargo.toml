@@ -6,40 +6,10 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-ipfs-embed = { path = "./patch_libs/ipfs_embed", features = [
-    "tokio",
-    "compat",
-] }
+rust-ipfs = { path = "./patch_libs/rust-ipfs" }
 tokio = { version = "1", features = ["full"] }
 tokio-stream = "0.1"
-libipld = "0.14"
+libipld = "0.16"
 anyhow = "1"
 futures = "0.3"
 clap = { version = "4", features = ["derive"] }
-
-# tempdir = "0.3.7"
-
-# async-std = { version = "1.12", features = ["attributes"] }
-# async-trait = "0.1"
-# env_logger = "0.10.0"
-# futures = "0.3.28"
-
-# libp2p = { version = "0.52", default-features = false, features = [
-#     "autonat",
-#     "dns",
-#     "async-std",
-#     "gossipsub",
-#     "mdns",
-#     "noise",
-#     "tcp",
-#     "yamux",
-#     "identify",
-#     "kad",
-#     "ping",
-#     "relay",
-#     "metrics",
-#     "rsa",
-#     "macros",
-#     "websocket",
-# ] }
-# libp2p-quic = { version = "0.9.2-alpha", features = ["async-std"] }
