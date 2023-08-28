@@ -1,0 +1,3 @@
+[submodule "patch_libs/ipfs_embed"]
+	path = patch_libs/ipfs_embed
+	url = https://github.com/ipfs-rust/ipfs-embed.git
