@@ -156,6 +156,7 @@ async fn main() -> anyhow::Result<()> {
         }
     });
 
+    // // Retrieve IPFS file
     // tokio::spawn({
     //     let ipfs = ipfs.clone();
     //     let mut stdout = stdout.clone();
@@ -200,65 +201,67 @@ async fn main() -> anyhow::Result<()> {
     //         Ok::<_, anyhow::Error>(())
     //     }
     // });
-    // tokio::spawn({
-    //     let ipfs = ipfs.clone();
-    //     let mut stdout = stdout.clone();
-    //     let cancel = cancel.clone();
 
-    //     async move {
-    //         let stream = ipfs.add_file_unixfs("./test").await?.boxed();
+    // Pinned file test
+    tokio::spawn({
+        let ipfs = ipfs.clone();
+        let mut stdout = stdout.clone();
+        let cancel = cancel.clone();
 
-    //         pin_mut!(stream);
+        async move {
+            let stream = ipfs.add_file_unixfs("./test").await?.boxed();
 
-    //         loop {
-    //             // let flag = tokio::select! {
-    //             //     flag = rx.next() => {
-    //             //         flag.unwrap_or_default()
-    //             //     },
-    //             //     _ = cancel.notified() => break
-    //             // };
-    //             // match flag {
-    //             //     true => {
-    //             let status = stream.next().await.unwrap();
-    //             match status {
-    //                 UnixfsStatus::ProgressStatus {
-    //                     written,
-    //                     total_size,
-    //                 } => match total_size {
-    //                     Some(size) => writeln!(stdout, "{written} out of {size} stored")?,
-    //                     None => writeln!(stdout, "{written} been stored")?,
-    //                 },
-    //                 UnixfsStatus::FailedStatus {
-    //                     written,
-    //                     total_size,
-    //                     error,
-    //                 } => {
-    //                     match total_size {
-    //                         Some(size) => {
-    //                             writeln!(stdout, "failed with {written} out of {size} stored")?
-    //                         }
-    //                         None => writeln!(stdout, "failed with {written} stored")?,
-    //                     }
+            pin_mut!(stream);
 
-    //                     if let Some(error) = error {
-    //                         anyhow::bail!(error);
-    //                     } else {
-    //                         anyhow::bail!("Unknown error while writting to blockstore");
-    //                     }
-    //                     // break;
-    //                 }
-    //                 UnixfsStatus::CompletedStatus { path, written, .. } => {
-    //                     writeln!(stdout, "{written} been stored with path {path}")?;
-    //                     break;
-    //                 }
-    //             }
-    //             // }
-    //             //     false => break,
-    //             // }
-    //         }
-    //         Ok::<_, anyhow::Error>(())
-    //     }
-    // });
+            loop {
+                // let flag = tokio::select! {
+                //     flag = rx.next() => {
+                //         flag.unwrap_or_default()
+                //     },
+                //     _ = cancel.notified() => break
+                // };
+                // match flag {
+                //     true => {
+                let status = stream.next().await.unwrap();
+                match status {
+                    UnixfsStatus::ProgressStatus {
+                        written,
+                        total_size,
+                    } => match total_size {
+                        Some(size) => writeln!(stdout, "{written} out of {size} stored")?,
+                        None => writeln!(stdout, "{written} been stored")?,
+                    },
+                    UnixfsStatus::FailedStatus {
+                        written,
+                        total_size,
+                        error,
+                    } => {
+                        match total_size {
+                            Some(size) => {
+                                writeln!(stdout, "failed with {written} out of {size} stored")?
+                            }
+                            None => writeln!(stdout, "failed with {written} stored")?,
+                        }
+
+                        if let Some(error) = error {
+                            anyhow::bail!(error);
+                        } else {
+                            anyhow::bail!("Unknown error while writting to blockstore");
+                        }
+                        // break;
+                    }
+                    UnixfsStatus::CompletedStatus { path, written, .. } => {
+                        writeln!(stdout, "{written} been stored with path {path}")?;
+                        break;
+                    }
+                }
+                // }
+                //     false => break,
+                // }
+            }
+            Ok::<_, anyhow::Error>(())
+        }
+    });
 
     // Subscibe topic
     let mut event_stream = ipfs.pubsub_events(&topic).await?;
