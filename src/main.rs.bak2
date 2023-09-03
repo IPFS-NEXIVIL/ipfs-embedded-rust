@@ -1,0 +1,52 @@
+use std::str::FromStr;
+// use clap::Parser;
+use futures::{pin_mut, StreamExt};
+// use futures::stream::StreamExt;
+// use rust_ipfs::p2p::PeerInfo;
+use rust_ipfs::{Ipfs, IpfsPath, Multiaddr};
+
+use rust_ipfs::UninitializedIpfsNoop as UninitializedIpfs;
+
+use std::process::exit;
+use tokio::io::AsyncWriteExt;
+
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    tracing_subscriber::fmt::init();
+
+    // Initialize the repo and start a daemon.
+    // UninitializedIpfs will handle starting up the repository and return the facade (ipfs::Ipfs)
+    let ipfs: Ipfs = UninitializedIpfs::new().start().await?;
+    ipfs.default_bootstrap().await?;
+
+    // Calling Ipfs::cat_unixfs returns a future of a stream, because the path resolving
+    // and the initial block loading will require at least one async call before any actual file
+    // content can be *streamed*.
+    let stream = ipfs
+        .cat_unixfs(
+            IpfsPath::from_str("/ipfs/QmWfVY9y3xjsixTgbd9AorQxH7VtMpzfx2HaWtsoUYecaX")?,
+            None,
+        )
+        .await?
+        .boxed();
+
+    // The stream needs to be pinned on the stack to be used with StreamExt::next
+    pin_mut!(stream);
+
+    let mut stdout = tokio::io::stdout();
+
+    loop {
+        // This could be made more performant by polling the stream while writing to stdout.
+        match stream.next().await {
+            Some(Ok(bytes)) => {
+                stdout.write_all(&bytes).await?;
+            }
+            Some(Err(e)) => {
+                eprintln!("Error: {e}");
+                exit(1);
+            }
+            None => break,
+        }
+    }
+    Ok(())
+}
