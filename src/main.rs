@@ -1,363 +1,250 @@
-use std::fmt::Debug;
-use std::str::FromStr;
-
-use clap::Parser;
-use futures::{channel::mpsc, pin_mut, FutureExt};
-use libipld::ipld;
-use libp2p::{futures::StreamExt, swarm::SwarmEvent};
-use rust_ipfs::p2p::PeerInfo;
-use rust_ipfs::unixfs::UnixfsStatus;
-use rust_ipfs::{BehaviourEvent, Ipfs, IpfsOptions, IpfsPath, Protocol, PubsubEvent};
-
-use rust_ipfs::UninitializedIpfsNoop as UninitializedIpfs;
-
-use rustyline_async::{Readline, ReadlineError, SharedWriter};
+use std::net::SocketAddr;
+use std::path::Path;
 use std::{io::Write, sync::Arc};
-use tokio::sync::Notify;
 
-#[derive(Debug, Parser)]
-#[clap(name = "pubsub")]
-struct Opt {
-    #[clap(long)]
-    disable_bootstrap: bool,
-    #[clap(long)]
-    disable_mdns: bool,
-    #[clap(long)]
-    disable_relay: bool,
-    #[clap(long)]
-    disable_upnp: bool,
-    #[clap(long)]
-    topic: Option<String>,
-    #[clap(long)]
-    stdout_log: bool,
-}
+// use std::fs::rea;
+
+// use tokio::net::UnixListener;
+use tokio::net::UdpSocket;
+use tokio::signal;
+use tokio::sync::{mpsc, Notify};
+use tokio::time::Duration;
+
+use libp2p::futures::StreamExt;
+use libp2p::swarm::SwarmEvent;
+
+use rust_ipfs::p2p::MultiaddrExt;
+use rust_ipfs::p2p::PeerInfo;
+use rust_ipfs::UninitializedIpfsNoop as UninitializedIpfs;
+use rust_ipfs::{unixfs::UnixfsStatus, Ipfs};
+
+// use rustyline_async::{Readline, ReadlineError,SharedWriter};
+// async fn ipfsInit() ->
+use env_logger::Builder;
+use log::LevelFilter;
+
+#[macro_use]
+extern crate log;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let opt = Opt::parse();
-    if opt.stdout_log {
-        tracing_subscriber::fmt::init();
-    }
+    // Program Shutdown Token
+    let cancel_token = Arc::new(Notify::new());
+    let (_, mut shutdown_recv) = mpsc::unbounded_channel::<bool>();
 
-    let topic = opt.topic.unwrap_or_else(|| String::from("ipfs-chat"));
+    // Initialize Loggin System
+    let (tx_log, mut rx_log) = mpsc::unbounded_channel::<(LevelFilter, String)>();
+    let mut builder = Builder::from_default_env();
+    builder
+        .format(|buf, record| writeln!(buf, "{} - {}", record.level(), record.args()))
+        .filter(None, LevelFilter::Info)
+        .init();
 
-    // Initialize the repo and start a daemon
-    // let opts = IpfsOptions {
-    //     // Used to discover peers locally
-    //     mdns: !opt.disable_mdns,
-    //     // Used, along with relay [client] for hole punching
-    //     dcutr: !opt.disable_relay,
-    //     // Used to connect to relays
-    //     relay: !opt.disable_relay,
-    //     relay_server: true,
-    //     listening_addrs: vec![
-    //         "/ip4/0.0.0.0/tcp/0".parse().unwrap(),
-    //         "/ip4/0.0.0.0/udp/0/quic-v1".parse().unwrap(),
-    //         "/ip6/::/tcp/0".parse().unwrap(),
-    //         "/ip6/::/udp/0/quic-v1".parse().unwrap(),
-    //     ],
-    //     // used to attempt port forwarding
-    //     port_mapping: !opt.disable_upnp,
-    //     ..Default::default()
-    // };
-
-    let (tx, mut rx) = mpsc::unbounded();
-
-    // Initialize IPFS node which GossipSub enabled
+    // Initialize IPFS
     let ipfs: Ipfs = UninitializedIpfs::new()
         .enable_mdns()
         .enable_relay(true)
         .enable_upnp()
         .swarm_events({
+            let cloned_tx_log = tx_log.clone();
             move |_, event| {
-                if let SwarmEvent::Behaviour(BehaviourEvent::Autonat(
-                    libp2p::autonat::Event::StatusChanged { new, .. },
-                )) = event
-                {
-                    match new {
-                        libp2p::autonat::NatStatus::Public(_) => {
-                            let _ = tx.unbounded_send(true);
-                        }
-                        libp2p::autonat::NatStatus::Private
-                        | libp2p::autonat::NatStatus::Unknown => {
-                            let _ = tx.unbounded_send(false);
-                        }
-                    }
+                if let SwarmEvent::NewListenAddr { address, .. } = event {
+                    let _ =
+                        cloned_tx_log.send((LevelFilter::Info, format!("Listening on {address}")));
                 }
             }
         })
         .start()
         .await?;
 
-    // Add Default Bootstrap node
-    ipfs.default_bootstrap().await?;
-
     // Set this node Identify
     let identity = ipfs.identity(None).await?;
     let PeerInfo {
         peer_id,
-        listen_addrs: addresses,
+        listen_addrs: _,
         ..
     } = identity;
-    for address in addresses {
-        println!("Listening on: {address}");
-    }
-    let (mut rl, mut stdout) = Readline::new(format!("{peer_id} >"))?;
+    let _ = tx_log.send((LevelFilter::Info, format!("Your ID: {peer_id}")));
+    // let (mut rl, mut stdout) = Readline::new(format!("{peer_id} >"))?;
+
+    // Add Default Bootstrap node
+    ipfs.default_bootstrap().await?;
 
     // Boootstrapping
-    tokio::spawn({
-        let ipfs = ipfs.clone();
-        async move { if let Err(_e) = ipfs.bootstrap().await {} }
-    });
+    if let Err(_e) = ipfs.bootstrap().await {
+        let _ = tx_log.send((LevelFilter::Error, "{e}".to_string()));
+    }
 
-    let cancel = Arc::new(Notify::new());
-    // Enabling
+    let bootstrap_nodes = ipfs.get_bootstraps().await.expect("Bootstrap exist");
+    let addrs = bootstrap_nodes.iter().cloned();
+
+    for mut addr in addrs {
+        let peer_id = addr
+            .extract_peer_id()
+            .expect("Bootstrap to contain peer id");
+        ipfs.add_relay(peer_id, addr).await?;
+    }
+
+    if let Err(e) = ipfs.enable_relay(None).await {
+        let _ = tx_log.send((LevelFilter::Error, format!("Error selecting a relay: {e}")));
+    }
+
+    let topic: String = "fruits".to_string();
+
+    // Socket for UNiX
+    // let listener = UnixListener::bind("./test").unwrap();
+
+    // Socket for Windows/Mac
+    let (tx, mut rx) = mpsc::unbounded_channel::<(Vec<u8>, SocketAddr)>();
+    let (tx_cid, mut rx_cid) = mpsc::unbounded_channel::<Vec<u8>>();
+
     tokio::spawn({
-        let ipfs = ipfs.clone();
-        let mut stdout = stdout.clone();
-        let cancel = cancel.clone();
+        let mut data: Option<Vec<u8>> = None;
+        let cloned_ipfs = ipfs.clone();
+        let cloned_topic = topic.clone();
+        let cloned_tx_log = tx_log.clone();
+
         async move {
-            let mut listening_addrs = vec![];
-            let mut relay_used = false;
             loop {
-                let flag = tokio::select! {
-                    flag = rx.next() => {
-                        flag.unwrap_or_default()
-                    },
-                    _ = cancel.notified() => break
-                };
-
-                match flag {
-                    true => {
-                        if relay_used {
-                            writeln!(stdout, "Disabling Relay...")?;
-                            for addr in listening_addrs.drain(..) {
-                                if let Err(_e) = ipfs.remove_listening_address(addr).await {}
+                tokio::select! {
+                    Some(_recv_data)=rx_cid.recv() =>{
+                        data=Some(_recv_data);
+                    }
+                    _=tokio::time::sleep(Duration::from_secs(1))=> {
+                        if let Some(_data) = data.clone() {
+                            if let Err(_e) = cloned_ipfs.pubsub_publish(cloned_topic.clone(), _data).await {
+                                let _=cloned_tx_log.send((LevelFilter::Error,"{_e}".to_string()));
+                                continue;
                             }
-                            relay_used = false;
                         }
                     }
-                    false => {
-                        if !relay_used {
-                            writeln!(stdout, "Enabling Relay...")?;
-                            for addr in ipfs.get_bootstraps().await? {
-                                let circuit = addr.with(Protocol::P2pCircuit);
-                                if let Ok(addr) = ipfs.add_listening_address(circuit.clone()).await
-                                {
-                                    listening_addrs.push(addr)
+                }
+            }
+        }
+    });
+
+    tokio::spawn({
+        // let mut stream = ipfs.add_file_unixfs(opt.file).await?;
+        let cloned_ipfs = ipfs.clone();
+        let cloned_tx_cid = tx_cid.clone();
+        let cloned_tx_log = tx_log.clone();
+
+        async move {
+            loop {
+                let (bytes, _) = rx.recv().await.unwrap();
+
+                let _ =
+                    cloned_tx_log.send((LevelFilter::Debug, format!("{:#?} bytes sent", &bytes)));
+                tokio::spawn({
+                    let cloned_ipfs_inner = cloned_ipfs.clone();
+                    let cloned_tx_cid_inner = cloned_tx_cid.clone();
+                    let cloned_tx_log_inner = cloned_tx_log.clone();
+
+                    let ss = String::from_utf8(bytes).unwrap();
+                    let _path = Path::new(&ss).to_owned().clone();
+                    async move {
+                        let mut stream = cloned_ipfs_inner.add_file_unixfs(_path).await.unwrap();
+                        while let Some(status) = stream.next().await {
+                            match status {
+                                UnixfsStatus::CompletedStatus { path, written, .. } => {
+                                    let _ = cloned_tx_log_inner.send((
+                                        LevelFilter::Debug,
+                                        format!("{written} been stored with path {path}"),
+                                    ));
+
+                                    let _cid = path.root().cid().unwrap();
+
+                                    cloned_tx_cid_inner
+                                        .send(_cid.to_string().into_bytes())
+                                        .unwrap();
+                                    cloned_ipfs_inner.insert_pin(&_cid, true).await.unwrap();
+                                    break;
                                 }
+                                _ => {}
                             }
-                            relay_used = !listening_addrs.is_empty();
                         }
                     }
-                }
+                });
             }
-            Ok::<_, anyhow::Error>(())
         }
     });
 
-    // // Retrieve IPFS file
-    // tokio::spawn({
-    //     let ipfs = ipfs.clone();
-    //     let mut stdout = stdout.clone();
-    //     let cancel = cancel.clone();
+    let listener = Arc::new(UdpSocket::bind("0.0.0.0:3132".parse::<SocketAddr>().unwrap()).await?);
+    let mut buf = [0; 4096];
 
-    //     async move {
-    //         let stream = ipfs
-    //             .cat_unixfs(
-    //                 IpfsPath::from_str("/ipfs/QmWfVY9y3xjsixTgbd9AorQxH7VtMpzfx2HaWtsoUYecaX")?,
-    //                 None,
-    //             )
-    //             .await?
-    //             .boxed();
-
-    //         pin_mut!(stream);
-
-    //         loop {
-    //             // let flag = tokio::select! {
-    //             //     flag = rx.next() => {
-    //             //         flag.unwrap_or_default()
-    //             //     },
-    //             //     _ = cancel.notified() => break
-    //             // };
-    //             // match flag {
-    //             //     true =>
-    //             match stream.next().await {
-    //                 Some(Ok(bytes)) => {
-    //                     writeln!(stdout, "{}", "sdsd")?;
-    //                     // stdout.write_all(&bytes).await?;
-    //                 }
-    //                 Some(Err(e)) => {
-    //                     eprintln!("Error: {e}");
-    //                     // exit(1);
-    //                     break;
-    //                 }
-    //                 None => break,
-    //                 // },
-    //                 // false => break,
-    //             }
-    //             // This could be made more performant by polling the stream while writing to stdout.
-    //         }
-    //         Ok::<_, anyhow::Error>(())
-    //     }
-    // });
-
-    // Pinned file test
     tokio::spawn({
-        let ipfs = ipfs.clone();
-        let mut stdout = stdout.clone();
-        let cancel = cancel.clone();
-
         async move {
-            let stream = ipfs.add_file_unixfs("./test").await?.boxed();
-
-            pin_mut!(stream);
-
             loop {
-                // let flag = tokio::select! {
-                //     flag = rx.next() => {
-                //         flag.unwrap_or_default()
-                //     },
-                //     _ = cancel.notified() => break
-                // };
-                // match flag {
-                //     true => {
-                let status = stream.next().await.unwrap();
-                match status {
-                    UnixfsStatus::ProgressStatus {
-                        written,
-                        total_size,
-                    } => match total_size {
-                        Some(size) => writeln!(stdout, "{written} out of {size} stored")?,
-                        None => writeln!(stdout, "{written} been stored")?,
-                    },
-                    UnixfsStatus::FailedStatus {
-                        written,
-                        total_size,
-                        error,
-                    } => {
-                        match total_size {
-                            Some(size) => {
-                                writeln!(stdout, "failed with {written} out of {size} stored")?
-                            }
-                            None => writeln!(stdout, "failed with {written} stored")?,
-                        }
-
-                        if let Some(error) = error {
-                            anyhow::bail!(error);
-                        } else {
-                            anyhow::bail!("Unknown error while writting to blockstore");
-                        }
-                        // break;
-                    }
-                    UnixfsStatus::CompletedStatus { path, written, .. } => {
-                        writeln!(stdout, "{written} been stored with path {path}")?;
-                        break;
-                    }
-                }
-                // }
-                //     false => break,
-                // }
+                println!("LISTEN UDP : {}", &"0.0.0.0:3132");
+                let (len, addr) = listener.recv_from(&mut buf).await.unwrap();
+                let _ = tx.send((buf[..len].to_vec(), addr));
+                println!("{:?} bytes received from {:?}", len, addr);
+                // tx.send((buf[..len].to_vec(), addr)).await.unwrap();
             }
-            Ok::<_, anyhow::Error>(())
         }
     });
-
-    // Subscibe topic
-    let mut event_stream = ipfs.pubsub_events(&topic).await?;
-
-    let stream = ipfs.pubsub_subscribe(topic.to_string()).await?;
-
-    pin_mut!(stream);
-
-    tokio::spawn(topic_discovery(ipfs.clone(), topic.clone(), stdout.clone()));
 
     tokio::task::yield_now().await;
-
     loop {
         tokio::select! {
-            data = stream.next() => {
-                if let Some(msg) = data {
-                    writeln!(stdout, "{}: {}", msg.source.expect("Message should contain a source peer_id"), String::from_utf8_lossy(&msg.data))?;
+            _ = signal::ctrl_c() => {
+                println!("SHUTDOWN");
+                cancel_token.notify_one();
+                break
+            }
+            Some(flag) = shutdown_recv.recv() => {
+                if flag == true {
+                    println!("SHUTDOWN2");
+                    cancel_token.notify_one();
+                    break
                 }
             }
-            Some(event) = event_stream.next() => {
-                match event {
-                    PubsubEvent::Subscribe { peer_id } => writeln!(stdout, "{} subscribed", peer_id)?,
-                    PubsubEvent::Unsubscribe { peer_id } => writeln!(stdout, "{} unsubscribed", peer_id)?,
+            Some((log_type, log_str)) = rx_log.recv() => match log_type {
+                LevelFilter::Info => {
+                    info!("{}",&log_str);
+                }
+                LevelFilter::Warn => {
+                    warn!("{}",&log_str);
+                }
+                LevelFilter::Error => {
+                    error!("{}",&log_str);
+                }
+                LevelFilter::Debug => {
+                    debug!("{}",&log_str);
+                }
+                _=>{
+                    println!("{}",&"Disabled Logging")
                 }
             }
-            line = rl.readline().fuse() => match line {
-                Ok(line) => {
-                    if let Err(e) = ipfs.pubsub_publish(topic.clone(), line.as_bytes().to_vec()).await {
-                        writeln!(stdout, "Error publishing message: {e}")?;
-                        continue;
-                    }
-                    writeln!(stdout, "{peer_id}: {line}")?;
-                }
-                Err(ReadlineError::Eof) => {
-                    cancel.notify_one();
-                    break
-                },
-                Err(ReadlineError::Interrupted) => {
-                    cancel.notify_one();
-                    break
-                },
-                Err(e) => {
-                    writeln!(stdout, "Error: {e}")?;
-                    writeln!(stdout, "Exiting...")?;
-                    break
-                },
-            }
+            // line = rl.readline().fuse() => match line {
+            //     Ok(line) => {
+            //         if let Err(e) = ipfs.pubsub_publish(topic.clone(), line.as_bytes().to_vec()).await {
+            //             writeln!(stdout, "Error publishing message: {e}")?;
+            //             // continue;
+            //         }
+            //         writeln!(stdout, "{peer_id}: {line}")?;
+            //     }
+            //     Err(ReadlineError::Eof) => {
+            //         println!("SHUTDOWN");
+            //         cancel_token.notify_one();
+            //         // break
+            //     },
+            //     Err(ReadlineError::Interrupted) => {
+            //         println!("SHUTDOWN2");
+            //         cancel_token.notify_one();
+            //         // break
+            //     },
+            //     Err(e) => {
+            //         // cancel_token.notify_one();
+
+            //         writeln!(stdout, "Error: {e}")?;
+            //         writeln!(stdout, "Exiting...")?;
+            //         // break
+            //     },
+            // }
         }
     }
-    // Exit
     ipfs.exit_daemon().await;
     Ok(())
+    // send shutdown signal to application and wait
 }
-
-//Note: This is temporary as a similar implementation will be used internally in the future
-async fn topic_discovery(
-    ipfs: Ipfs,
-    topic: String,
-    mut stdout: SharedWriter,
-) -> anyhow::Result<()> {
-    let cid = ipfs.put_dag(ipld!(topic.clone())).await?;
-    ipfs.provide(cid).await?;
-    writeln!(stdout, "{}", topic)?;
-    writeln!(stdout, "{cid}")?;
-    loop {
-        let mut stream = ipfs.get_providers(cid).await?.boxed();
-        while let Some(_providers) = stream.next().await {}
-    }
-}
-
-// async fn get_file(ipfs: Ipfs) -> anyhow::Result<()> {
-//     let mut stdout = tokio::io::stdout();
-
-//     let stream = ipfs
-//         .cat_unixfs(
-//             IpfsPath::from_str("/ipfs/QmWfVY9y3xjsixTgbd9AorQxH7VtMpzfx2HaWtsoUYecaX")?,
-//             None,
-//         )
-//         .await?
-//         .boxed();
-
-//     pin_mut!(stream);
-
-//     loop {
-//         // This could be made more performant by polling the stream while writing to stdout.
-//         match stream.next().await {
-//             Some(Ok(bytes)) => {
-//                 stdout.write_all(&bytes).await?;
-//             }
-//             Some(Err(e)) => {
-//                 eprintln!("Error: {e}");
-//                 // exit(1);
-//                 break;
-//             }
-//             None => break,
-//         }
-//     }
-//     Ok::<_, anyhow::Error>(())
-// }
