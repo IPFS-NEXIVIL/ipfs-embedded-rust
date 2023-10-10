@@ -1,7 +1,7 @@
-use rust_ipfs::NetworkBehaviour;
+// use rust_ipfs::NetworkBehaviour;
 
-#[derive(NetworkBehaviour)]
-#[behaviour(to_swarm = "Event")]
-struct CustomNetBehaviour {
+// #[derive(NetworkBehaviour)]
+// #[behaviour(to_swarm = "Event")]
+// struct CustomNetBehaviour {
     
-}
+// }
