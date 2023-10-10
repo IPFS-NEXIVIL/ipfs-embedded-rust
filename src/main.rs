@@ -2,9 +2,6 @@ use std::net::SocketAddr;
 use std::path::Path;
 use std::{io::Write, sync::Arc};
 
-// use std::fs::rea;
-
-// use tokio::net::UnixListener;
 use tokio::net::UdpSocket;
 use tokio::signal;
 use tokio::sync::{mpsc, Notify};
@@ -18,8 +15,6 @@ use rust_ipfs::p2p::PeerInfo;
 use rust_ipfs::UninitializedIpfsNoop as UninitializedIpfs;
 use rust_ipfs::{unixfs::UnixfsStatus, Ipfs};
 
-// use rustyline_async::{Readline, ReadlineError,SharedWriter};
-// async fn ipfsInit() ->
 use env_logger::Builder;
 use log::LevelFilter;
 
@@ -42,9 +37,13 @@ async fn main() -> anyhow::Result<()> {
 
     // Initialize IPFS
     let ipfs: Ipfs = UninitializedIpfs::new()
-        .enable_mdns()
+        // .enable_mdns()
         .enable_relay(true)
         .enable_upnp()
+        .enable_relay_server(None)
+        .enable_rendezvous_server()
+        .listen_as_external_addr()
+        .fd_limit(rust_ipfs::FDLimit::Max)
         .swarm_events({
             let cloned_tx_log = tx_log.clone();
             move |_, event| {
@@ -65,7 +64,6 @@ async fn main() -> anyhow::Result<()> {
         ..
     } = identity;
     let _ = tx_log.send((LevelFilter::Info, format!("Your ID: {peer_id}")));
-    // let (mut rl, mut stdout) = Readline::new(format!("{peer_id} >"))?;
 
     // Add Default Bootstrap node
     ipfs.default_bootstrap().await?;
@@ -108,12 +106,15 @@ async fn main() -> anyhow::Result<()> {
             loop {
                 tokio::select! {
                     Some(_recv_data)=rx_cid.recv() =>{
-                        data=Some(_recv_data);
+                        data=Some(_recv_data.clone());
+                        if let Err(_e) = cloned_ipfs.pubsub_publish(cloned_topic.clone(), _recv_data).await {
+                            let _=cloned_tx_log.send((LevelFilter::Error,format!("{_e}")));
+                        }
                     }
                     _=tokio::time::sleep(Duration::from_secs(1))=> {
                         if let Some(_data) = data.clone() {
                             if let Err(_e) = cloned_ipfs.pubsub_publish(cloned_topic.clone(), _data).await {
-                                let _=cloned_tx_log.send((LevelFilter::Error,"{_e}".to_string()));
+                                let _=cloned_tx_log.send((LevelFilter::Error,format!("{_e}")));
                                 continue;
                             }
                         }
@@ -124,7 +125,6 @@ async fn main() -> anyhow::Result<()> {
     });
 
     tokio::spawn({
-        // let mut stream = ipfs.add_file_unixfs(opt.file).await?;
         let cloned_ipfs = ipfs.clone();
         let cloned_tx_cid = tx_cid.clone();
         let cloned_tx_log = tx_log.clone();
@@ -183,6 +183,11 @@ async fn main() -> anyhow::Result<()> {
             }
         }
     });
+
+    // let _asdasd = ipfs
+    //     .find_peer("12D3KooWJvMFqsvvSojDmBeffhQFfRPNQRCmErvbYFsN89i5Czwy".parse()?)
+    //     .await?;
+    // println!("{:?}", _asdasd);
 
     tokio::task::yield_now().await;
     loop {
