@@ -12,7 +12,7 @@ use libp2p::swarm::SwarmEvent;
 
 use rust_ipfs::p2p::MultiaddrExt;
 use rust_ipfs::p2p::PeerInfo;
-use rust_ipfs::UninitializedIpfsNoop as UninitializedIpfs;
+use rust_ipfs::{UninitializedIpfsNoop as UninitializedIpfs, IpfsOptions};
 use rust_ipfs::{unixfs::UnixfsStatus, Ipfs};
 
 use env_logger::Builder;
@@ -35,24 +35,44 @@ async fn main() -> anyhow::Result<()> {
         .filter(None, LevelFilter::Info)
         .init();
 
+    // Configurtaion Libp2p Transport
+    let _transportonfig = rust_ipfs::p2p::TransportConfig {
+        enable_webrtc: true,
+        port_reuse: true,
+        enable_websocket: true,
+        enable_secure_websocket: false,
+        ..rust_ipfs::p2p::TransportConfig::default()
+    };
+    let _ipfsConfig = IpfsOptions {
+        listening_addrs: vec![
+                "/ip4/0.0.0.0/tcp/0".parse().unwrap(),
+                "/ip4/0.0.0.0/tcp/0/ws".parse().unwrap(),
+                // "/ip4/0.0.0.0/udp/0/webrtc".parse().unwrap(),
+                // "/ip4/0.0.0.0/udp/0/quic-v1".parse().unwrap(),
+                "/ip6/::/tcp/0".parse().unwrap(),
+                // "/ip6/::/udp/0/quic-v1".parse().unwrap(),
+            ],
+        ..IpfsOptions::default()
+    };
     // Initialize IPFS
-    let ipfs: Ipfs = UninitializedIpfs::new()
+    let ipfs: Ipfs = UninitializedIpfs::with_opt(_ipfsConfig)
         // .enable_mdns()
+        .set_transport_configuration(_transportonfig)
         .enable_relay(true)
-        .enable_upnp()
+        // .enable_upnp()
         .enable_relay_server(None)
         .enable_rendezvous_server()
         .listen_as_external_addr()
         .fd_limit(rust_ipfs::FDLimit::Max)
-        .swarm_events({
-            let cloned_tx_log = tx_log.clone();
-            move |_, event| {
-                if let SwarmEvent::NewListenAddr { address, .. } = event {
-                    let _ =
-                        cloned_tx_log.send((LevelFilter::Info, format!("Listening on {address}")));
-                }
-            }
-        })
+        // .swarm_events({
+        //     let cloned_tx_log = tx_log.clone();
+        //     move |_, event| {
+        //         if let SwarmEvent::NewListenAddr { address, .. } = event {
+        //             let _ =
+        //                 cloned_tx_log.send((LevelFilter::Info, format!("Listening on {address}")));
+        //         }
+        //     }
+        // })
         .start()
         .await?;
 
@@ -60,11 +80,13 @@ async fn main() -> anyhow::Result<()> {
     let identity = ipfs.identity(None).await?;
     let PeerInfo {
         peer_id,
-        listen_addrs: _,
+        listen_addrs,
         ..
     } = identity;
     let _ = tx_log.send((LevelFilter::Info, format!("Your ID: {peer_id}")));
-
+    for addr in listen_addrs {
+        let _ = tx_log.send((LevelFilter::Info, format!("{}", addr)));
+    }
     // Add Default Bootstrap node
     ipfs.default_bootstrap().await?;
 
@@ -77,7 +99,7 @@ async fn main() -> anyhow::Result<()> {
     let addrs = bootstrap_nodes.iter().cloned();
 
     for mut addr in addrs {
-        let peer_id = addr
+        let peer_id: libp2p::PeerId = addr
             .extract_peer_id()
             .expect("Bootstrap to contain peer id");
         ipfs.add_relay(peer_id, addr).await?;
