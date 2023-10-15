@@ -9,20 +9,31 @@ use tokio::time::Duration;
 
 use libp2p::futures::StreamExt;
 use libp2p::swarm::SwarmEvent;
+use libp2p::Multiaddr;
 
 use rust_ipfs::p2p::MultiaddrExt;
 use rust_ipfs::p2p::PeerInfo;
-use rust_ipfs::{UninitializedIpfsNoop as UninitializedIpfs, IpfsOptions};
 use rust_ipfs::{unixfs::UnixfsStatus, Ipfs};
+use rust_ipfs::{IpfsOptions, UninitializedIpfsNoop as UninitializedIpfs};
 
 use env_logger::Builder;
 use log::LevelFilter;
 
+use clap::Parser;
+
 #[macro_use]
 extern crate log;
 
+#[derive(Debug, Parser)]
+#[clap(name = "lowpower-gateway-rust")]
+struct Opt {
+    #[clap(long)]
+    addr: Multiaddr,
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    let opt = Opt::parse();
     // Program Shutdown Token
     let cancel_token = Arc::new(Notify::new());
     let (_, mut shutdown_recv) = mpsc::unbounded_channel::<bool>();
@@ -32,7 +43,7 @@ async fn main() -> anyhow::Result<()> {
     let mut builder = Builder::from_default_env();
     builder
         .format(|buf, record| writeln!(buf, "{} - {}", record.level(), record.args()))
-        .filter(None, LevelFilter::Info)
+        .filter(None, LevelFilter::Error)
         .init();
 
     // Configurtaion Libp2p Transport
@@ -45,13 +56,13 @@ async fn main() -> anyhow::Result<()> {
     };
     let _ipfsConfig = IpfsOptions {
         listening_addrs: vec![
-                "/ip4/0.0.0.0/tcp/0".parse().unwrap(),
-                "/ip4/0.0.0.0/tcp/0/ws".parse().unwrap(),
-                // "/ip4/0.0.0.0/udp/0/webrtc".parse().unwrap(),
-                // "/ip4/0.0.0.0/udp/0/quic-v1".parse().unwrap(),
-                "/ip6/::/tcp/0".parse().unwrap(),
-                // "/ip6/::/udp/0/quic-v1".parse().unwrap(),
-            ],
+            "/ip4/0.0.0.0/tcp/0".parse().unwrap(),
+            "/ip4/0.0.0.0/tcp/0/ws".parse().unwrap(),
+            // "/ip4/0.0.0.0/udp/0/webrtc".parse().unwrap(),
+            // "/ip4/0.0.0.0/udp/0/quic-v1".parse().unwrap(),
+            "/ip6/::/tcp/0".parse().unwrap(),
+            // "/ip6/::/udp/0/quic-v1".parse().unwrap(),
+        ],
         ..IpfsOptions::default()
     };
     // Initialize IPFS
@@ -71,6 +82,14 @@ async fn main() -> anyhow::Result<()> {
         //             let _ =
         //                 cloned_tx_log.send((LevelFilter::Info, format!("Listening on {address}")));
         //         }
+        //         if let SwarmEvent::ConnectionClosed {
+        //             peer_id,
+        //             connection_id,
+        //             endpoint,
+        //             num_established,
+        //             cause,
+        //         } = event
+        //         {}
         //     }
         // })
         .start()
@@ -84,12 +103,23 @@ async fn main() -> anyhow::Result<()> {
         ..
     } = identity;
     let _ = tx_log.send((LevelFilter::Info, format!("Your ID: {peer_id}")));
+    println!("Your ID: {peer_id}");
     for addr in listen_addrs {
         let _ = tx_log.send((LevelFilter::Info, format!("{}", addr)));
+        println!("{}", addr);
     }
     // Add Default Bootstrap node
     ipfs.default_bootstrap().await?;
+    ipfs.add_peer(
+        "QmcFf2FH3CEgTNHeMRGhN7HNHU1EXAxoEk6EFuSyXCsvRE".parse()?,
+        "/dnsaddr/node-1.ingress.cloudflare-ipfs.com".parse()?,
+    )
+    .await?;
 
+    // ipfs.add_bootstrap("/dns4/elastic.dag.house/tcp/443/wss/p2p/bafzbeibhqavlasjc7dvbiopygwncnrtvjd2xmryk5laib7zyjor6kf3avm".parse()?).await?;
+    ipfs.add_bootstrap("/dns4/hoverboard-staging.dag.haus/tcp/443/wss/p2p/Qmc5vg9zuLYvDR1wtYHCaxjBHenfCNautRwCjG3n5v5fbs".parse()?).await?;
+    ipfs.add_bootstrap(opt.addr).await?;
+    // .await?;
     // Boootstrapping
     if let Err(_e) = ipfs.bootstrap().await {
         let _ = tx_log.send((LevelFilter::Error, "{e}".to_string()));
@@ -109,7 +139,8 @@ async fn main() -> anyhow::Result<()> {
         let _ = tx_log.send((LevelFilter::Error, format!("Error selecting a relay: {e}")));
     }
 
-    let topic: String = "fruits".to_string();
+    let topic: String = format!("{peer_id}").to_string();
+    let _ = tx_log.send((LevelFilter::Info, format!("TOPIC: {topic}")));
 
     // Socket for UNiX
     // let listener = UnixListener::bind("./test").unwrap();
@@ -197,10 +228,10 @@ async fn main() -> anyhow::Result<()> {
     tokio::spawn({
         async move {
             loop {
-                println!("LISTEN UDP : {}", &"0.0.0.0:3132");
+                // println!("LISTEN UDP : {}", &"0.0.0.0:3132");
                 let (len, addr) = listener.recv_from(&mut buf).await.unwrap();
                 let _ = tx.send((buf[..len].to_vec(), addr));
-                println!("{:?} bytes received from {:?}", len, addr);
+                // println!("{:?} bytes received from {:?}", len, addr);
                 // tx.send((buf[..len].to_vec(), addr)).await.unwrap();
             }
         }
@@ -212,6 +243,7 @@ async fn main() -> anyhow::Result<()> {
     // println!("{:?}", _asdasd);
 
     tokio::task::yield_now().await;
+    println!("Successfully Loaded");
     loop {
         tokio::select! {
             _ = signal::ctrl_c() => {

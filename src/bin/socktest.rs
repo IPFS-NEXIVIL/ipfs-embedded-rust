@@ -91,7 +91,7 @@ async fn main() -> anyhow::Result<()> {
             loop {
                 tokio::select! {
                 Some(_path) = rx_done.recv()=>{
-                    println!("{}",_path);
+                    // println!("{}",_path);
                     let _ = listener.send_to(
                             &_path.as_bytes(),
                             "127.0.0.1:3132".parse::<SocketAddr>().unwrap(),
