@@ -8,7 +8,7 @@ use tokio::sync::{mpsc, Notify};
 use tokio::time::Duration;
 
 use libp2p::futures::StreamExt;
-use libp2p::swarm::SwarmEvent;
+// use libp2p::swarm::SwarmEvent;
 use libp2p::Multiaddr;
 
 use rust_ipfs::p2p::MultiaddrExt;
@@ -28,7 +28,7 @@ extern crate log;
 #[clap(name = "lowpower-gateway-rust")]
 struct Opt {
     #[clap(long)]
-    addr: Multiaddr,
+    addr: Option<Multiaddr>,
 }
 
 #[tokio::main]
@@ -54,20 +54,20 @@ async fn main() -> anyhow::Result<()> {
         enable_secure_websocket: false,
         ..rust_ipfs::p2p::TransportConfig::default()
     };
-    let _ipfsConfig = IpfsOptions {
+    let _ipfs_config = IpfsOptions {
         listening_addrs: vec![
-            "/ip4/0.0.0.0/tcp/0".parse().unwrap(),
-            "/ip4/0.0.0.0/tcp/0/ws".parse().unwrap(),
-            // "/ip4/0.0.0.0/udp/0/webrtc".parse().unwrap(),
-            // "/ip4/0.0.0.0/udp/0/quic-v1".parse().unwrap(),
-            "/ip6/::/tcp/0".parse().unwrap(),
+            "/ip4/0.0.0.0/tcp/4001".parse().unwrap(),
+            "/ip4/0.0.0.0/tcp/4002/ws".parse().unwrap(),
+            // "/ip4/0.0.0.0/udp/4001/webrtc".parse().unwrap(),
+            "/ip4/0.0.0.0/udp/4001/quic-v1".parse().unwrap(),
+            "/ip6/::/tcp/4001".parse().unwrap(),
             // "/ip6/::/udp/0/quic-v1".parse().unwrap(),
         ],
         ..IpfsOptions::default()
     };
     // Initialize IPFS
-    let ipfs: Ipfs = UninitializedIpfs::with_opt(_ipfsConfig)
-        // .enable_mdns()
+    let ipfs: Ipfs = UninitializedIpfs::with_opt(_ipfs_config)
+        .enable_mdns()
         .set_transport_configuration(_transportonfig)
         .enable_relay(true)
         // .enable_upnp()
@@ -118,7 +118,9 @@ async fn main() -> anyhow::Result<()> {
 
     // ipfs.add_bootstrap("/dns4/elastic.dag.house/tcp/443/wss/p2p/bafzbeibhqavlasjc7dvbiopygwncnrtvjd2xmryk5laib7zyjor6kf3avm".parse()?).await?;
     ipfs.add_bootstrap("/dns4/hoverboard-staging.dag.haus/tcp/443/wss/p2p/Qmc5vg9zuLYvDR1wtYHCaxjBHenfCNautRwCjG3n5v5fbs".parse()?).await?;
-    ipfs.add_bootstrap(opt.addr).await?;
+    if let Some(addr) = opt.addr {
+        ipfs.add_bootstrap(addr).await?;
+    }
     // .await?;
     // Boootstrapping
     if let Err(_e) = ipfs.bootstrap().await {
@@ -223,7 +225,7 @@ async fn main() -> anyhow::Result<()> {
     });
 
     let listener = Arc::new(UdpSocket::bind("0.0.0.0:3132".parse::<SocketAddr>().unwrap()).await?);
-    let mut buf = [0; 4096];
+    let mut buf = [0; 1024];
 
     tokio::spawn({
         async move {
